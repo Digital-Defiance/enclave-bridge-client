@@ -1,6 +1,6 @@
 {
   "name": "@digitaldefiance/enclave-bridge-client",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "TypeScript client for Enclave Bridge - Node.js to Apple Secure Enclave bridge",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
