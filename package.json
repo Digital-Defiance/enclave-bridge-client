@@ -1,0 +1,66 @@
+{
+  "name": "@digitaldefiance/enclave-bridge-client",
+  "version": "1.0.2",
+  "description": "TypeScript client for Enclave Bridge - Node.js to Apple Secure Enclave bridge",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run src/",
+    "test:integration": "vitest run tests/integration/",
+    "test:e2e": "npx tsx tests/e2e/enclave-bridge.e2e.ts",
+    "test:all": "npm run test:unit && npm run test:integration",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "secure-enclave",
+    "apple",
+    "macos",
+    "cryptography",
+    "ecies",
+    "secp256k1",
+    "bridge",
+    "ipc",
+    "unix-socket"
+  ],
+  "author": "Digital Defiance",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Digital-Defiance/enclave-bridge.git",
+    "directory": "enclave-bridge-client"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "eslint": "^8.55.0",
+    "tsup": "^8.0.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@digitaldefiance/node-ecies-lib": ">=4.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
+}
