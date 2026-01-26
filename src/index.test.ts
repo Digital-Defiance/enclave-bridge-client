@@ -397,17 +397,28 @@ describe('EnclaveBridgeClient', () => {
       await expect(requestPromise).rejects.toThrow('Connection closed');
     });
 
-    it('should throw when another request is pending', async () => {
+    it('should queue concurrent requests instead of rejecting', async () => {
       const client = new EnclaveBridgeClient();
       const connectPromise = client.connect();
       connectCallback?.();
       await connectPromise;
 
-      // Start first request (don't respond)
-      client.getPublicKey();
+      // Start first request (don't respond yet)
+      const req1 = client.getPublicKey();
+      // Start second request - should be queued instead of throwing
+      const req2 = client.getEnclavePublicKey();
 
-      // Second request should fail
-      await expect(client.getEnclavePublicKey()).rejects.toThrow('Another request is pending');
+      // Respond to first request
+      const testKey1 = Buffer.from('03' + 'ab'.repeat(32), 'hex');
+      mockSocket.emit('data', JSON.stringify({ publicKey: testKey1.toString('base64') }));
+
+      // Respond to second request
+      const testKey2 = Buffer.from('04' + 'cd'.repeat(64), 'hex');
+      mockSocket.emit('data', JSON.stringify({ publicKey: testKey2.toString('base64') }));
+
+      const [result1, result2] = await Promise.all([req1, req2]);
+      expect(result1.buffer).toEqual(testKey1);
+      expect(result2.buffer).toEqual(testKey2);
     });
   });
 

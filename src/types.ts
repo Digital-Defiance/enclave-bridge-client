@@ -5,7 +5,7 @@
 /**
  * Connection state for the client
  */
-export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
 /**
  * Client configuration options
@@ -22,6 +22,65 @@ export interface EnclaveBridgeClientOptions {
    * @default 30000
    */
   timeout?: number;
+
+  /**
+   * Enable auto-reconnection on disconnect
+   * @default true
+   */
+  autoReconnect?: boolean;
+
+  /**
+   * Maximum number of reconnection attempts
+   * @default 5
+   */
+  maxReconnectAttempts?: number;
+
+  /**
+   * Initial reconnect delay in milliseconds
+   * @default 1000
+   */
+  reconnectDelay?: number;
+
+  /**
+   * Maximum reconnect delay in milliseconds (for exponential backoff)
+   * @default 30000
+   */
+  maxReconnectDelay?: number;
+
+  /**
+   * Enable verbose debug logging
+   * @default false
+   */
+  debug?: boolean;
+
+  /**
+   * Custom logger function
+   */
+  logger?: (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => void;
+
+  /**
+   * Enable key caching
+   * @default true
+   */
+  cacheKeys?: boolean;
+
+  /**
+   * Maximum number of concurrent requests
+   * @default 10
+   */
+  maxConcurrentRequests?: number;
+
+  /**
+   * Enable heartbeat/keepalive
+   * @default false
+   */
+  enableHeartbeat?: boolean;
+
+  /**
+   * Heartbeat interval in milliseconds
+   * @default 30000
+   */
+  heartbeatInterval?: number;
 }
 
 /**
@@ -204,7 +263,240 @@ export interface EnclaveBridgeClientEvents {
   disconnect: () => void;
 
   /**
+   * Emitted when reconnection attempt starts
+   */
+  reconnecting: (attempt: number, maxAttempts: number) => void;
+
+  /**
+   * Emitted when reconnection succeeds
+   */
+  reconnected: () => void;
+
+  /**
+   * Emitted when all reconnection attempts fail
+   */
+  reconnectFailed: (error: Error) => void;
+
+  /**
    * Emitted when an error occurs
    */
   error: (error: Error) => void;
+
+  /**
+   * Emitted when debug logging is enabled
+   */
+  debug: (message: string, meta?: Record<string, unknown>) => void;
+
+  /**
+   * Emitted before disconnect
+   */
+  beforeDisconnect: () => void;
+
+  /**
+   * Emitted when a request is sent (debug only)
+   */
+  requestSent: (command: string, payload?: Record<string, string>) => void;
+
+  /**
+   * Emitted when a response is received (debug only)
+   */
+  responseReceived: (response: string) => void;
+}
+
+/**
+ * Queued request information
+ */
+export interface QueuedRequest {
+  command: string;
+  payload?: Record<string, string>;
+  resolve: (value: string) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+  timestamp: number;
+  sent: boolean;
+}
+
+/**
+ * Platform support information
+ */
+export interface PlatformSupport {
+  /**
+   * Whether the platform is supported
+   */
+  supported: boolean;
+
+  /**
+   * Reason for lack of support (if unsupported)
+   */
+  reason?: string;
+
+  /**
+   * Detected platform
+   */
+  platform: string;
+
+  /**
+   * Whether socket file exists
+   */
+  socketExists: boolean;
+
+  /**
+   * Socket file path checked
+   */
+  socketPath: string;
+}
+
+/**
+ * Health status information
+ */
+export interface HealthStatus {
+  /**
+   * Whether the bridge is healthy
+   */
+  healthy: boolean;
+
+  /**
+   * Connection state
+   */
+  state: ConnectionState;
+
+  /**
+   * Uptime in milliseconds
+   */
+  uptime: number;
+
+  /**
+   * Number of active requests
+   */
+  activeRequests: number;
+
+  /**
+   * Number of queued requests
+   */
+  queuedRequests: number;
+
+  /**
+   * Last heartbeat time
+   */
+  lastHeartbeat?: number;
+
+  /**
+   * Reconnection attempts
+   */
+  reconnectAttempts?: number;
+}
+
+/**
+ * Server version information
+ */
+export interface ServerVersion {
+  /**
+   * Application version
+   */
+  appVersion: string;
+
+  /**
+   * Build number/identifier
+   */
+  build: string;
+
+  /**
+   * Platform (e.g., "macOS")
+   */
+  platform: string;
+
+  /**
+   * Server uptime in seconds
+   */
+  uptimeSeconds: number;
+}
+
+/**
+ * Server status information
+ */
+export interface ServerStatus {
+  /**
+   * Whether operation succeeded
+   */
+  ok: boolean;
+
+  /**
+   * Whether peer public key is set
+   */
+  peerPublicKeySet: boolean;
+
+  /**
+   * Whether Secure Enclave key is available
+   */
+  enclaveKeyAvailable: boolean;
+}
+
+/**
+ * Server metrics
+ */
+export interface ServerMetrics {
+  /**
+   * Service name
+   */
+  service: string;
+
+  /**
+   * Server uptime in seconds
+   */
+  uptimeSeconds: number;
+
+  /**
+   * Request counters
+   */
+  requestCounters?: Record<string, number>;
+}
+
+/**
+ * Key information in list
+ */
+export interface KeyInfo {
+  /**
+   * Key identifier
+   */
+  id: string;
+
+  /**
+   * Base64 encoded public key
+   */
+  publicKey: string;
+}
+
+/**
+ * Available keys list
+ */
+export interface KeyList {
+  /**
+   * ECIES keys
+   */
+  ecies: KeyInfo[];
+
+  /**
+   * Enclave keys
+   */
+  enclave: KeyInfo[];
+}
+
+/**
+ * Heartbeat response
+ */
+export interface HeartbeatResponse {
+  /**
+   * Whether operation succeeded
+   */
+  ok: boolean;
+
+  /**
+   * Server timestamp (ISO8601)
+   */
+  timestamp: string;
+
+  /**
+   * Service name
+   */
+  service: string;
 }

@@ -13,7 +13,12 @@
  *   npm run test:e2e
  */
 
-import { EnclaveBridgeClient, parseECIES, ECIESEncryptionType } from '../../src/index.js';
+import {
+  EnclaveBridgeClient,
+  parseECIES,
+  ECIESEncryptionType,
+  EnclaveBridgeError,
+} from '../../src/index.js';
 
 // Detect if running in sandboxed app or not
 const SOCKET_PATHS = [
@@ -74,7 +79,7 @@ async function main() {
     process.exit(1);
   }
 
-  let client: EnclaveBridgeClient | null = null;
+  let client: EnclaveBridgeClient | undefined;
   let bridgePublicKey: Buffer | null = null;
 
   try {
@@ -135,6 +140,39 @@ async function main() {
       for (let i = 1; i < 33; i++) testPeerKey[i] = i;
 
       await client!.setPeerPublicKey(testPeerKey);
+    });
+
+    // Test: Server Commands
+    console.log('\nServer Command Tests:');
+    await runTest('Should get server version', async () => {
+      const version = await client!.getVersion();
+      if (!version.appVersion) {
+        throw new Error('No app version returned');
+      }
+      console.log(`    Version: ${version.appVersion} (build ${version.build})`);
+    });
+
+    await runTest('Should get server status', async () => {
+      const status = await client!.getStatus();
+      console.log(`    Status - Peer key set: ${status.peerPublicKeySet}, Enclave available: ${status.enclaveKeyAvailable}`);
+    });
+
+    await runTest('Should send heartbeat', async () => {
+      const hb = await client!.heartbeat();
+      if (!hb.ok) {
+        throw new Error('Heartbeat returned ok: false');
+      }
+      console.log(`    Heartbeat OK at ${hb.timestamp}`);
+    });
+
+    await runTest('Should get server metrics', async () => {
+      const metrics = await client!.getMetrics();
+      console.log(`    Uptime: ${metrics.uptimeSeconds}s`);
+    });
+
+    await runTest('Should list available keys', async () => {
+      const keys = await client!.listKeys();
+      console.log(`    ECIES keys: ${keys.ecies.length}, Enclave keys: ${keys.enclave.length}`);
     });
 
     // Test: Signing
@@ -252,8 +290,12 @@ async function main() {
     console.error('\nFatal error:', error);
   } finally {
     // Ensure disconnection
-    if (client?.isConnected) {
-      await client.disconnect();
+    if (client && client.isConnected) {
+      try {
+        await client.disconnect();
+      } catch (err) {
+        console.warn('Error during cleanup:', err instanceof Error ? err.message : String(err));
+      }
     }
   }
 

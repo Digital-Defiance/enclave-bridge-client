@@ -51,21 +51,42 @@ Enclave Bridge is a macOS status bar application (SwiftUI, Apple Silicon only) t
   - Two main encryption types: "basic" and "withLength" (latter includes 8-byte length prefix)
 
 ## API Commands
-1. **GET_PUBLIC_KEY**
+1. **HEARTBEAT**
+   - Request: `{ "cmd": "HEARTBEAT" }`
+   - Response: `{ "ok": true, "timestamp": "<ISO8601 timestamp>", "service": "enclave-bridge" }`
+2. **VERSION / INFO**
+   - Request: `{ "cmd": "VERSION" }`
+   - Response: `{ "appVersion": "<version>", "build": "<build>", "platform": "macOS", "uptimeSeconds": <int> }`
+3. **STATUS**
+   - Request: `{ "cmd": "STATUS" }`
+   - Response: `{ "ok": true, "peerPublicKeySet": <bool>, "enclaveKeyAvailable": <bool> }`
+4. **METRICS**
+   - Request: `{ "cmd": "METRICS" }`
+   - Response: `{ "service": "enclave-bridge", "uptimeSeconds": <int>, "requestCounters": {} }` (counters TBD)
+5. **GET_PUBLIC_KEY**
    - Request: `{ "cmd": "GET_PUBLIC_KEY" }` (unencrypted or special case)
    - Response: `{ "publicKey": <hex/base64 secp256k1 public key> }`
-2. **SET_PEER_PUBLIC_KEY**
+6. **GET_ENCLAVE_PUBLIC_KEY**
+   - Request: `{ "cmd": "GET_ENCLAVE_PUBLIC_KEY" }`
+   - Response: `{ "publicKey": <hex/base64 P-256 public key> }`
+7. **SET_PEER_PUBLIC_KEY**
    - Request: `{ "cmd": "SET_PEER_PUBLIC_KEY", "publicKey": <peer key> }`
    - Response: `{ "ok": true }`
-3. **ENCLAVE_SIGN**
+8. **LIST_KEYS**
+   - Request: `{ "cmd": "LIST_KEYS" }`
+   - Response: `{ "ecies": [{ "id": "ecies-default", "publicKey": <base64> }], "enclave": [{ "id": "enclave-default", "publicKey": <base64> }] }`
+9. **ENCLAVE_SIGN**
    - Request: `{ "cmd": "ENCLAVE_SIGN", "data": <data> }`
    - Response: `{ "signature": <signature> }`
-4. **ENCLAVE_DECRYPT**
+10. **ENCLAVE_DECRYPT**
    - Request: `{ "cmd": "ENCLAVE_DECRYPT", "data": <ciphertext> }`
    - Response: `{ "plaintext": <decrypted> }`
-5. **ENCLAVE_GENERATE_KEY**
+11. **ENCLAVE_GENERATE_KEY**
    - Request: `{ "cmd": "ENCLAVE_GENERATE_KEY" }`
-   - Response: `{ "ok": true, "publicKey": <new key> }`
+   - Response: `{ "error": "ENCLAVE_GENERATE_KEY not implemented" }` (currently stub)
+12. **ENCLAVE_ROTATE_KEY**
+   - Request: `{ "cmd": "ENCLAVE_ROTATE_KEY" }`
+   - Response: `{ "error": "ENCLAVE_ROTATE_KEY not supported on this platform" }` (pending Secure Enclave support)
 - **Error Handling:** All errors returned as `{ "error": "message" }` (encrypted if possible)
 
 ## Implementation Notes
@@ -121,6 +142,9 @@ All cryptographic operations in the Swift bridge must match these details exactl
 5. Integrate Secure Enclave operations (keygen, sign, decrypt)
 6. Create SwiftUI status bar app shell
 7. Test end-to-end with NodeJS client using @digitaldefiance/node-ecies-lib
+8. Implement Secure Enclave key generation/rotation flows once platform APIs allow stable retrieval/replacement
+9. Add real request counters and surface them via METRICS
+10. Implement ENCLAVE_GENERATE_KEY and ENCLAVE_ROTATE_KEY handlers end-to-end
 
 ---
 This document contains all research and design decisions to date. Resume from here to continue implementation.

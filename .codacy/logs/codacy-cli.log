@@ -1,0 +1,29 @@
+2026-01-26T13:25:57-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T13:25:57-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command command=init full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init --provider gh --organization Digital-Defiance --repository enclave-bridge-client --api-token ***] args=[]
+2026-01-26T13:29:11-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T13:29:11-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command args=[] command=init full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init --provider gh --organization Digital-Defiance --repository enclave-bridge-client --api-token ***]
+2026-01-26T13:29:44-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T13:29:44-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command args=[] command=init full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init --provider gh --organization Digital-Defiance --repository enclave-bridge-client --api-token ***]
+2026-01-26T13:29:56-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T13:29:56-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command command=init full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init --provider gh --organization Digital-Defiance --repository enclave-bridge-client --api-token ***] args=[]
+2026-01-26T13:30:20-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T13:30:20-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command command=init full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init --provider gh --organization Digital-Defiance --repository enclave-bridge-client --api-token ***] args=[]
+2026-01-26T13:30:32-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T13:30:32-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command command=init full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init --provider gh --organization Digital-Defiance --repository enclave-bridge-client --api-token ***] args=[]
+2026-01-26T14:00:40-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T14:00:40-08:00 [INFO] (codacy-cli-v2/cli-v2.go:55) No configuration file was found, execute init command first.
+2026-01-26T14:00:47-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T14:00:47-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init --provider gh --organization Digital-Defiance --repository enclave-bridge-client --api-token ***] args=[] command=init
+2026-01-26T14:05:10-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T14:05:10-08:00 [INFO] (codacy-cli-v2/cli-v2.go:55) No configuration file was found, execute init command first.
+2026-01-26T14:05:13-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T14:05:13-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command command=init full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 init] args=[]
+2026-01-26T14:05:24-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T14:05:24-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command command=install full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 install] args=[]
+2026-01-26T14:05:24-08:00 [INFO] (codacy-cli-v2/cmd/install.go:72) All components are already installed
+2026-01-26T14:05:24-08:00 [INFO] (codacy-cli-v2/cli-v2.go:27) Starting Codacy CLI version=1.0.0-main.368.sha.e1bb1bc (e1bb1bc) built at 2026-01-14T16:47:26Z
+2026-01-26T14:05:24-08:00 [INFO] (codacy-cli-v2/cmd/root.go:34) Executing CLI command command=analyze full_command=[/Users/jessica/Library/Caches/Codacy/codacy-cli-v2/1.0.0-main.368.sha.e1bb1bc/codacy-cli-v2 analyze src/index.ts --format sarif] args=[src/index.ts]
+2026-01-26T14:05:24-08:00 [INFO] (codacy-cli-v2/cmd/analyze.go:353) Config file found for tool toolConfigPath=.codacy/tools-configs/lizard.yaml tool=lizard
+2026-01-26T14:05:24-08:00 [INFO] (codacy-cli-v2/cmd/analyze.go:353) Config file found for tool tool=semgrep toolConfigPath=.codacy/tools-configs/semgrep.yaml
+2026-01-26T14:05:28-08:00 [INFO] (codacy-cli-v2/cmd/analyze.go:353) Config file found for tool tool=trivy toolConfigPath=.codacy/tools-configs/trivy.yaml
+2026-01-26T14:05:28-08:00 [INFO] (codacy-cli-v2/cmd/analyze.go:353) Config file found for tool tool=eslint toolConfigPath=.codacy/tools-configs/eslint.config.mjs

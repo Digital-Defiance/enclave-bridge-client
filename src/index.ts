@@ -5,19 +5,26 @@
  * providing access to:
  * - Secure Enclave P-256 key operations (signing)
  * - secp256k1 key operations (ECIES decryption)
- * - Key management
+ * - Key management and server status
  *
- * Protocol Format:
- * - Request: COMMAND:base64_payload (or just COMMAND for no payload)
- * - Response: OK:base64_result or ERROR:message
+ * Protocol Format (JSON):
+ * - Request: {"cmd": "COMMAND", ...payload}
+ * - Response: {"publicKey": "...", ...} or {"error": "message"}
  */
 
 import { Socket, createConnection } from 'node:net';
 import { EventEmitter } from 'node:events';
+import { platform } from 'node:os';
+import { access, constants as fsConstants } from 'node:fs/promises';
 
 // Re-export types and utilities
 export * from './types.js';
 export * from './ecies.js';
+export * from './errors.js';
+export * from './crypto.js';
+export { ConnectionPool } from './pool.js';
+export type { ConnectionPoolOptions } from './pool.js';
+export * from './streaming.js';
 
 import type {
   EnclaveBridgeClientOptions,
@@ -27,7 +34,23 @@ import type {
   DecryptionResult,
   KeyGenerationResult,
   BridgeResponse,
+  QueuedRequest,
+  PlatformSupport,
+  HealthStatus,
+  ServerVersion,
+  ServerStatus,
+  ServerMetrics,
+  KeyList,
+  HeartbeatResponse,
 } from './types.js';
+
+import {
+  ConnectionError,
+  TimeoutError,
+  InvalidOperationError,
+  ProtocolError,
+  PlatformError,
+} from './errors.js';
 
 /**
  * Default socket path for Enclave Bridges
@@ -38,6 +61,31 @@ export const DEFAULT_SOCKET_PATH = '/tmp/enclave-bridge.sock';
  * Default connection timeout in milliseconds
  */
 export const DEFAULT_TIMEOUT = 30000;
+
+/**
+ * Default reconnect delay in milliseconds
+ */
+export const DEFAULT_RECONNECT_DELAY = 1000;
+
+/**
+ * Default maximum reconnect delay in milliseconds
+ */
+export const DEFAULT_MAX_RECONNECT_DELAY = 30000;
+
+/**
+ * Default maximum reconnect attempts
+ */
+export const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
+
+/**
+ * Default heartbeat interval in milliseconds
+ */
+export const DEFAULT_HEARTBEAT_INTERVAL = 30000;
+
+/**
+ * Default maximum concurrent requests
+ */
+export const DEFAULT_MAX_CONCURRENT_REQUESTS = 10;
 
 /**
  * Enclave Bridge Client
@@ -69,13 +117,39 @@ export class EnclaveBridgeClient extends EventEmitter {
   private socketPath: string;
   private timeout: number;
   private responseBuffer = '';
-  private pendingRequest: {
-    resolve: (value: string) => void;
-    reject: (error: Error) => void;
-    timer: NodeJS.Timeout;
-  } | null = null;
-
+  
+  // Request queue management
+  private requestQueue: QueuedRequest[] = [];
+  private activeRequests = 0;
+  private maxConcurrentRequests: number;
+  
+  // Auto-reconnect configuration
+  private autoReconnect: boolean;
+  private maxReconnectAttempts: number;
+  private reconnectDelay: number;
+  private maxReconnectDelay: number;
+  private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  
+  // Debug logging
+  private debug: boolean;
+  private logger?: (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => void;
+  
+  // Key caching
+  private cacheKeys: boolean;
+  private cachedPublicKey: PublicKeyInfo | null = null;
+  private cachedEnclavePublicKey: PublicKeyInfo | null = null;
+  
+  // Heartbeat
+  private enableHeartbeat: boolean;
+  private heartbeatInterval: number;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private lastHeartbeat: number | null = null;
+  
+  // Connection tracking
   private _connectionState: ConnectionState = 'disconnected';
+  private connectedAt: number | null = null;
+  private isManualDisconnect = false;
 
   /**
    * Creates a new Enclave Bridge client
@@ -86,6 +160,16 @@ export class EnclaveBridgeClient extends EventEmitter {
     super();
     this.socketPath = options.socketPath ?? DEFAULT_SOCKET_PATH;
     this.timeout = options.timeout ?? DEFAULT_TIMEOUT;
+    this.autoReconnect = options.autoReconnect ?? true;
+    this.maxReconnectAttempts = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
+    this.reconnectDelay = options.reconnectDelay ?? DEFAULT_RECONNECT_DELAY;
+    this.maxReconnectDelay = options.maxReconnectDelay ?? DEFAULT_MAX_RECONNECT_DELAY;
+    this.debug = options.debug ?? false;
+    this.logger = options.logger;
+    this.cacheKeys = options.cacheKeys ?? true;
+    this.maxConcurrentRequests = options.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS;
+    this.enableHeartbeat = options.enableHeartbeat ?? false;
+    this.heartbeatInterval = options.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL;
   }
 
   /**
@@ -103,6 +187,52 @@ export class EnclaveBridgeClient extends EventEmitter {
   }
 
   /**
+   * Log a debug message
+   */
+  private log(level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>): void {
+    if (this.logger) {
+      this.logger(level, message, meta);
+    } else if (this.debug || level !== 'debug') {
+      const metaStr = meta ? ` ${JSON.stringify(meta)}` : '';
+      console[level === 'debug' ? 'log' : level](`[EnclaveBridge:${level}] ${message}${metaStr}`);
+    }
+    
+    if (this.debug && level === 'debug') {
+      this.emit('debug', message, meta);
+    }
+  }
+
+  /**
+   * Check platform support
+   */
+  static async isSupported(socketPath: string = DEFAULT_SOCKET_PATH): Promise<PlatformSupport> {
+    const plat = platform();
+    const result: PlatformSupport = {
+      supported: false,
+      platform: plat,
+      socketExists: false,
+      socketPath,
+    };
+
+    // Check if macOS
+    if (plat !== 'darwin') {
+      result.reason = 'Enclave Bridge requires macOS';
+      return result;
+    }
+
+    // Check if socket exists
+    try {
+      await access(socketPath, fsConstants.F_OK);
+      result.socketExists = true;
+      result.supported = true;
+    } catch {
+      result.reason = 'Enclave Bridge socket not found. Is the app running?';
+    }
+
+    return result;
+  }
+
+  /**
    * Connect to the Enclave socket server
    *
    * @returns Promise that resolves when connected
@@ -110,9 +240,11 @@ export class EnclaveBridgeClient extends EventEmitter {
    */
   async connect(): Promise<void> {
     if (this.socket) {
-      throw new Error('Already connected');
+      throw new InvalidOperationError('Already connected');
     }
 
+    this.log('info', 'Connecting to Enclave Bridge', { socketPath: this.socketPath });
+    this.isManualDisconnect = false;
     this._connectionState = 'connecting';
     this.emit('stateChange', this._connectionState);
 
@@ -122,14 +254,24 @@ export class EnclaveBridgeClient extends EventEmitter {
         this.socket = null;
         this._connectionState = 'disconnected';
         this.emit('stateChange', this._connectionState);
-        reject(new Error(`Connection timeout after ${this.timeout}ms`));
+        reject(new TimeoutError(`Connection timeout after ${this.timeout}ms`, 'connect', this.timeout));
       }, this.timeout);
 
       this.socket = createConnection(this.socketPath, () => {
         clearTimeout(connectionTimer);
         this._connectionState = 'connected';
+        this.connectedAt = Date.now();
+        this.reconnectAttempts = 0;
         this.emit('stateChange', this._connectionState);
         this.emit('connect');
+        
+        this.log('info', 'Connected to Enclave Bridge');
+        
+        // Start heartbeat if enabled
+        if (this.enableHeartbeat) {
+          this.startHeartbeat();
+        }
+        
         resolve();
       });
 
@@ -141,32 +283,88 @@ export class EnclaveBridgeClient extends EventEmitter {
 
       this.socket.on('error', (err) => {
         clearTimeout(connectionTimer);
+        this.log('error', 'Socket error', { error: err.message });
         this._connectionState = 'error';
         this.emit('stateChange', this._connectionState);
-        this.emit('error', err);
+        this.emit('error', new ConnectionError(err.message, { originalError: err }));
 
-        if (this.pendingRequest) {
-          this.pendingRequest.reject(err);
-          clearTimeout(this.pendingRequest.timer);
-          this.pendingRequest = null;
-        }
-
-        reject(err);
+        this.rejectAllPendingRequests(err);
+        reject(new ConnectionError(err.message, { originalError: err }));
       });
 
       this.socket.on('close', () => {
+        this.log('warn', 'Socket closed');
+        this.stopHeartbeat();
         this.socket = null;
         this._connectionState = 'disconnected';
         this.emit('stateChange', this._connectionState);
         this.emit('disconnect');
 
-        if (this.pendingRequest) {
-          this.pendingRequest.reject(new Error('Connection closed'));
-          clearTimeout(this.pendingRequest.timer);
-          this.pendingRequest = null;
+        this.rejectAllPendingRequests(new ConnectionError('Connection closed'));
+        
+        // Auto-reconnect if enabled and not manually disconnected
+        if (this.autoReconnect && !this.isManualDisconnect) {
+          this.scheduleReconnect();
         }
       });
     });
+  }
+
+  /**
+   * Schedule a reconnection attempt
+   */
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      const error = new ConnectionError(
+        `Failed to reconnect after ${this.maxReconnectAttempts} attempts`,
+        { reconnectAttempts: this.reconnectAttempts }
+      );
+      this.log('error', 'Reconnection failed', { attempts: this.reconnectAttempts });
+      this.emit('reconnectFailed', error);
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = Math.min(
+      this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+      this.maxReconnectDelay
+    );
+
+    this.log('info', 'Scheduling reconnection', { 
+      attempt: this.reconnectAttempts, 
+      maxAttempts: this.maxReconnectAttempts,
+      delay 
+    });
+
+    this._connectionState = 'reconnecting';
+    this.emit('stateChange', this._connectionState);
+    this.emit('reconnecting', this.reconnectAttempts, this.maxReconnectAttempts);
+
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.connect();
+        this.emit('reconnected');
+        this.log('info', 'Reconnected successfully');
+      } catch (err) {
+        this.log('warn', 'Reconnection attempt failed', { 
+          attempt: this.reconnectAttempts,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  /**
+   * Reject all pending requests with an error
+   */
+  private rejectAllPendingRequests(error: Error): void {
+    for (const request of this.requestQueue) {
+      clearTimeout(request.timer);
+      request.reject(error);
+    }
+    this.requestQueue = [];
+    this.activeRequests = 0;
   }
 
   /**
@@ -177,12 +375,64 @@ export class EnclaveBridgeClient extends EventEmitter {
       return;
     }
 
+    this.log('info', 'Disconnecting from Enclave Bridge');
+    this.isManualDisconnect = true;
+    this.emit('beforeDisconnect');
+    
+    // Stop heartbeat
+    this.stopHeartbeat();
+    
+    // Clear reconnect timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    
+    // Clear caches
+    this.invalidateCache();
+
     return new Promise((resolve) => {
       this.socket!.once('close', () => {
         resolve();
       });
       this.socket!.end();
     });
+  }
+
+  /**
+   * Start heartbeat/keepalive
+   */
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(async () => {
+      try {
+        await this.heartbeat();
+        this.lastHeartbeat = Date.now();
+        this.log('debug', 'Heartbeat successful');
+      } catch (err) {
+        this.log('warn', 'Heartbeat failed', { 
+          error: err instanceof Error ? err.message : String(err) 
+        });
+      }
+    }, this.heartbeatInterval);
+  }
+
+  /**
+   * Stop heartbeat
+   */
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Invalidate cached keys
+   */
+  private invalidateCache(): void {
+    this.cachedPublicKey = null;
+    this.cachedEnclavePublicKey = null;
   }
 
   /**
@@ -193,6 +443,7 @@ export class EnclaveBridgeClient extends EventEmitter {
    */
   private handleData(data: string): void {
     this.responseBuffer += data;
+    this.log('debug', 'Received data', { length: data.length });
 
     // Try to parse complete JSON objects
     let startIndex = 0;
@@ -250,14 +501,56 @@ export class EnclaveBridgeClient extends EventEmitter {
       const jsonStr = this.responseBuffer.substring(jsonStart, jsonEnd + 1);
       startIndex = jsonEnd + 1;
 
-      if (this.pendingRequest) {
-        clearTimeout(this.pendingRequest.timer);
-        this.pendingRequest.resolve(jsonStr);
-        this.pendingRequest = null;
+      this.log('debug', 'Parsed response', { response: jsonStr });
+      this.emit('responseReceived', jsonStr);
+
+      // Find the first request that was actually sent (not just queued)
+      const sentRequestIndex = this.requestQueue.findIndex((r) => r.sent);
+      if (sentRequestIndex !== -1) {
+        const request = this.requestQueue[sentRequestIndex];
+        clearTimeout(request.timer);
+        this.activeRequests--;
+        request.resolve(jsonStr);
+        
+        // Remove the resolved request from queue
+        this.requestQueue.splice(sentRequestIndex, 1);
+        
+        // Process next queued request if any
+        this.processQueue();
       }
     }
 
     this.responseBuffer = this.responseBuffer.substring(startIndex);
+  }
+
+  /**
+   * Process the next request in the queue
+   */
+  private processQueue(): void {
+    if (this.activeRequests >= this.maxConcurrentRequests || this.requestQueue.length === 0) {
+      return;
+    }
+
+    // Find the first unsent request
+    const request = this.requestQueue.find((r) => !r.sent);
+    if (!request) return;
+
+    this.activeRequests++;
+    request.sent = true;
+    this.sendRequestToSocket(request.command, request.payload);
+  }
+
+  /**
+   * Send request directly to socket
+   */
+  private sendRequestToSocket(command: string, payload?: Record<string, string>): void {
+    const request: Record<string, string> = { cmd: command, ...payload };
+    const message = JSON.stringify(request);
+    
+    this.log('debug', 'Sending request', { command, payload });
+    this.emit('requestSent', command, payload);
+    
+    this.socket!.write(message);
   }
 
   /**
@@ -273,26 +566,34 @@ export class EnclaveBridgeClient extends EventEmitter {
    */
   private async sendCommand(command: string, payload?: Record<string, string>): Promise<string> {
     if (!this.socket || !this.isConnected) {
-      throw new Error('Not connected to EnclaveBridge');
-    }
-
-    if (this.pendingRequest) {
-      throw new Error('Another request is pending');
+      throw new InvalidOperationError('Not connected to EnclaveBridge');
     }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pendingRequest = null;
-        reject(new Error(`Request timeout after ${this.timeout}ms`));
+        const index = this.requestQueue.findIndex((r) => r.resolve === resolve);
+        if (index !== -1) {
+          this.requestQueue.splice(index, 1);
+        }
+        reject(new TimeoutError(`Request timeout after ${this.timeout}ms`, command, this.timeout));
       }, this.timeout);
 
-      this.pendingRequest = { resolve, reject, timer };
+      const request: QueuedRequest = {
+        command,
+        payload,
+        resolve,
+        reject,
+        timer,
+        timestamp: Date.now(),
+        sent: false,
+      };
 
-      // Build JSON message according to the protocol spec
-      const request: Record<string, string> = { cmd: command, ...payload };
-      const message = JSON.stringify(request);
-
-      this.socket!.write(message);
+      this.requestQueue.push(request);
+      
+      // Try to process immediately if under concurrency limit
+      if (this.activeRequests < this.maxConcurrentRequests) {
+        this.processQueue();
+      }
     });
   }
 
@@ -315,8 +616,11 @@ export class EnclaveBridgeClient extends EventEmitter {
       }
 
       return { success: true, json };
-    } catch {
-      return { success: false, error: `Invalid JSON response: ${response}` };
+    } catch (err) {
+      throw new ProtocolError(`Invalid JSON response: ${response}`, { 
+        response, 
+        parseError: err instanceof Error ? err.message : String(err) 
+      });
     }
   }
 
@@ -330,29 +634,41 @@ export class EnclaveBridgeClient extends EventEmitter {
    * This key is used for ECIES encryption/decryption and is persisted
    * in the macOS Keychain.
    *
+   * @param skipCache - Skip cache and fetch fresh key
    * @returns Promise resolving to the public key info
    */
-  async getPublicKey(): Promise<PublicKeyInfo> {
+  async getPublicKey(skipCache = false): Promise<PublicKeyInfo> {
+    if (this.cacheKeys && !skipCache && this.cachedPublicKey) {
+      this.log('debug', 'Returning cached public key');
+      return this.cachedPublicKey;
+    }
+
     const response = await this.sendCommand('GET_PUBLIC_KEY');
     const parsed = this.parseResponse(response);
 
     if (!parsed.success || !parsed.json) {
-      throw new Error(`Failed to get public key: ${parsed.error}`);
+      throw new ProtocolError(`Failed to get public key: ${parsed.error}`);
     }
 
     const base64Key = parsed.json.publicKey as string;
     if (!base64Key) {
-      throw new Error('Response missing publicKey field');
+      throw new ProtocolError('Response missing publicKey field');
     }
 
     const buffer = Buffer.from(base64Key, 'base64');
 
-    return {
+    const result: PublicKeyInfo = {
       base64: base64Key,
       buffer,
       hex: buffer.toString('hex'),
       compressed: buffer.length === 33,
     };
+
+    if (this.cacheKeys) {
+      this.cachedPublicKey = result;
+    }
+
+    return result;
   }
 
   /**
@@ -362,29 +678,41 @@ export class EnclaveBridgeClient extends EventEmitter {
    * used for signing operations. The private key never leaves the
    * Secure Enclave.
    *
+   * @param skipCache - Skip cache and fetch fresh key
    * @returns Promise resolving to the Secure Enclave public key info
    */
-  async getEnclavePublicKey(): Promise<PublicKeyInfo> {
+  async getEnclavePublicKey(skipCache = false): Promise<PublicKeyInfo> {
+    if (this.cacheKeys && !skipCache && this.cachedEnclavePublicKey) {
+      this.log('debug', 'Returning cached Enclave public key');
+      return this.cachedEnclavePublicKey;
+    }
+
     const response = await this.sendCommand('GET_ENCLAVE_PUBLIC_KEY');
     const parsed = this.parseResponse(response);
 
     if (!parsed.success || !parsed.json) {
-      throw new Error(`Failed to get Enclave public key: ${parsed.error}`);
+      throw new ProtocolError(`Failed to get Enclave public key: ${parsed.error}`);
     }
 
     const base64Key = parsed.json.publicKey as string;
     if (!base64Key) {
-      throw new Error('Response missing publicKey field');
+      throw new ProtocolError('Response missing publicKey field');
     }
 
     const buffer = Buffer.from(base64Key, 'base64');
 
-    return {
+    const result: PublicKeyInfo = {
       base64: base64Key,
       buffer,
       hex: buffer.toString('hex'),
       compressed: buffer.length === 33, // P-256 keys are typically uncompressed (65 bytes)
     };
+
+    if (this.cacheKeys) {
+      this.cachedEnclavePublicKey = result;
+    }
+
+    return result;
   }
 
   /**
@@ -409,7 +737,7 @@ export class EnclaveBridgeClient extends EventEmitter {
         keyBuffer = Buffer.from(publicKey, 'base64');
       }
     } else {
-      throw new Error('Public key must be a string or Buffer');
+      throw new InvalidOperationError('Public key must be a string or Buffer');
     }
 
     const response = await this.sendCommand('SET_PEER_PUBLIC_KEY', {
@@ -418,7 +746,7 @@ export class EnclaveBridgeClient extends EventEmitter {
     const parsed = this.parseResponse(response);
 
     if (!parsed.success) {
-      throw new Error(`Failed to set peer public key: ${parsed.error}`);
+      throw new ProtocolError(`Failed to set peer public key: ${parsed.error}`);
     }
   }
 
@@ -443,12 +771,12 @@ export class EnclaveBridgeClient extends EventEmitter {
     const parsed = this.parseResponse(response);
 
     if (!parsed.success || !parsed.json) {
-      throw new Error(`Failed to sign: ${parsed.error}`);
+      throw new ProtocolError(`Failed to sign: ${parsed.error}`);
     }
 
     const signatureBase64 = parsed.json.signature as string;
     if (!signatureBase64) {
-      throw new Error('Response missing signature field');
+      throw new ProtocolError('Response missing signature field');
     }
 
     const signatureBuffer = Buffer.from(signatureBase64, 'base64');
@@ -485,12 +813,12 @@ export class EnclaveBridgeClient extends EventEmitter {
     const parsed = this.parseResponse(response);
 
     if (!parsed.success || !parsed.json) {
-      throw new Error(`Failed to decrypt: ${parsed.error}`);
+      throw new ProtocolError(`Failed to decrypt: ${parsed.error}`);
     }
 
     const plaintextBase64 = parsed.json.plaintext as string;
     if (!plaintextBase64) {
-      throw new Error('Response missing plaintext field');
+      throw new ProtocolError('Response missing plaintext field');
     }
 
     const plaintextBuffer = Buffer.from(plaintextBase64, 'base64');
@@ -512,6 +840,40 @@ export class EnclaveBridgeClient extends EventEmitter {
     return this.decrypt(encryptedData);
   }
 
+  /**
+   * Encrypt data using ECIES (client-side)
+   * 
+   * This performs encryption locally without contacting the bridge.
+   * Requires @digitaldefiance/node-ecies-lib to be installed.
+   * 
+   * @param data - Data to encrypt
+   * @param recipientPublicKey - Optional recipient public key (defaults to bridge's key)
+   * @returns Promise resolving to encrypted data
+   */
+  async encrypt(data: Buffer | string, recipientPublicKey?: Buffer): Promise<Buffer> {
+    const { encrypt: encryptFn } = await import('./crypto.js');
+    const pubKey = recipientPublicKey ?? (await this.getPublicKey()).buffer;
+    return encryptFn(pubKey, data);
+  }
+
+  /**
+   * Verify a signature from the Secure Enclave
+   * 
+   * @param data - Original data that was signed
+   * @param signature - Signature to verify
+   * @param publicKey - Optional public key (defaults to Enclave public key)
+   * @returns Promise resolving to true if signature is valid
+   */
+  async verifySignature(
+    data: Buffer | string,
+    signature: Buffer,
+    publicKey?: Buffer
+  ): Promise<boolean> {
+    const { verifyP256Signature } = await import('./crypto.js');
+    const pubKey = publicKey ?? (await this.getEnclavePublicKey()).buffer;
+    return verifyP256Signature(data, signature, pubKey);
+  }
+
   // ============================================================================
   // Key Generation
   // ============================================================================
@@ -529,12 +891,12 @@ export class EnclaveBridgeClient extends EventEmitter {
     const parsed = this.parseResponse(response);
 
     if (!parsed.success || !parsed.json) {
-      throw new Error(`Failed to generate key: ${parsed.error}`);
+      throw new ProtocolError(`Failed to generate key: ${parsed.error}`);
     }
 
     const publicKeyBase64 = parsed.json.publicKey as string;
     if (!publicKeyBase64) {
-      throw new Error('Response missing publicKey field');
+      throw new ProtocolError('Response missing publicKey field');
     }
 
     const publicKeyBuffer = Buffer.from(publicKeyBase64, 'base64');
@@ -565,6 +927,148 @@ export class EnclaveBridgeClient extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Send a heartbeat to the server
+   * 
+   * @returns Promise resolving to heartbeat response
+   */
+  async heartbeat(): Promise<HeartbeatResponse> {
+    const response = await this.sendCommand('HEARTBEAT');
+    const parsed = this.parseResponse(response);
+
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`Heartbeat failed: ${parsed.error}`);
+    }
+
+    const hbResponse = parsed.json as Record<string, unknown>;
+    if (!hbResponse.ok) {
+      throw new ProtocolError('Heartbeat returned ok: false');
+    }
+
+    return {
+      ok: hbResponse.ok as boolean,
+      timestamp: (hbResponse.timestamp as string) ?? new Date().toISOString(),
+      service: (hbResponse.service as string) ?? 'enclave-bridge',
+    };
+  }
+
+  /**
+   * Get server version information
+   * 
+   * @returns Promise resolving to version info
+   */
+  async getVersion(): Promise<ServerVersion> {
+    const response = await this.sendCommand('VERSION');
+    const parsed = this.parseResponse(response);
+
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`Failed to get version: ${parsed.error}`);
+    }
+
+    const version = parsed.json;
+    return {
+      appVersion: (version.appVersion as string) ?? 'unknown',
+      build: (version.build as string) ?? 'unknown',
+      platform: (version.platform as string) ?? 'unknown',
+      uptimeSeconds: (version.uptimeSeconds as number) ?? 0,
+    };
+  }
+
+  /**
+   * Get server status
+   * 
+   * @returns Promise resolving to server status
+   */
+  async getStatus(): Promise<ServerStatus> {
+    const response = await this.sendCommand('STATUS');
+    const parsed = this.parseResponse(response);
+
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`Failed to get status: ${parsed.error}`);
+    }
+
+    const status = parsed.json;
+    return {
+      ok: (status.ok as boolean) ?? false,
+      peerPublicKeySet: (status.peerPublicKeySet as boolean) ?? false,
+      enclaveKeyAvailable: (status.enclaveKeyAvailable as boolean) ?? false,
+    };
+  }
+
+  /**
+   * Get server metrics
+   * 
+   * @returns Promise resolving to server metrics
+   */
+  async getMetrics(): Promise<ServerMetrics> {
+    const response = await this.sendCommand('METRICS');
+    const parsed = this.parseResponse(response);
+
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`Failed to get metrics: ${parsed.error}`);
+    }
+
+    const metrics = parsed.json;
+    return {
+      service: (metrics.service as string) ?? 'enclave-bridge',
+      uptimeSeconds: (metrics.uptimeSeconds as number) ?? 0,
+      requestCounters: (metrics.requestCounters as Record<string, number>) ?? {},
+    };
+  }
+
+  /**
+   * List available keys on the server
+   * 
+   * @returns Promise resolving to available keys
+   */
+  async listKeys(): Promise<KeyList> {
+    const response = await this.sendCommand('LIST_KEYS');
+    const parsed = this.parseResponse(response);
+
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`Failed to list keys: ${parsed.error}`);
+    }
+
+    const keyList = parsed.json;
+    return {
+      ecies: (keyList.ecies as Array<{ id: string; publicKey: string }>) ?? [],
+      enclave: (keyList.enclave as Array<{ id: string; publicKey: string }>) ?? [],
+    };
+  }
+
+  /**
+   * Rotate Secure Enclave key (if supported)
+   * 
+   * @returns Promise resolving when key rotation completes
+   */
+  async rotateKey(): Promise<void> {
+    const response = await this.sendCommand('ENCLAVE_ROTATE_KEY');
+    const parsed = this.parseResponse(response);
+
+    if (!parsed.success) {
+      throw new ProtocolError(`Failed to rotate key: ${parsed.error}`);
+    }
+  }
+
+  /**
+   * Get health status information
+   *
+   * @returns Health status object
+   */
+  getHealthStatus(): HealthStatus {
+    const uptime = this.connectedAt ? Date.now() - this.connectedAt : 0;
+    
+    return {
+      healthy: this.isConnected,
+      state: this._connectionState,
+      uptime,
+      activeRequests: this.activeRequests,
+      queuedRequests: this.requestQueue.length,
+      lastHeartbeat: this.lastHeartbeat ?? undefined,
+      reconnectAttempts: this.reconnectAttempts,
+    };
   }
 
   /**
