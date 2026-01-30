@@ -18,7 +18,7 @@ TypeScript client for **Enclave Bridge** - a macOS app that bridges Node.js to A
 ## Prerequisites
 
 - macOS with Apple Silicon (M1/M2/M3) or T2 chip
-- [Enclave Bridge](https://github.com/Digital-Defiance/enclave-bridge/releases) macOS app running
+- [Enclave Bridge](https://github.com/Digital-Defiance/enclave-bridge/releases) macOS app running. Also available directly from [Apple App Store](https://apps.apple.com/us/app/enclave-bridge/id6758280835?mt=12).
 - Node.js 18+
 
 ## Installation
