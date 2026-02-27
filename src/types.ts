@@ -461,9 +461,29 @@ export interface KeyInfo {
   id: string;
 
   /**
-   * Base64 encoded public key
+   * Key type (secp256k1 or Secure Enclave)
    */
-  publicKey: string;
+  type: string;
+
+  /**
+   * Public key fingerprint
+   */
+  publicKeyFingerprint: string;
+
+  /**
+   * Is Secure Enclave key
+   */
+  isSecureEnclave: boolean;
+
+  /**
+   * TOTP enabled status
+   */
+  totpEnabled: boolean;
+
+  /**
+   * TOTP provisioning URI (if enabled)
+   */
+  totpProvisioningURI?: string;
 }
 
 /**
@@ -471,14 +491,9 @@ export interface KeyInfo {
  */
 export interface KeyList {
   /**
-   * ECIES keys
+   * All keys (merged)
    */
-  ecies: KeyInfo[];
-
-  /**
-   * Enclave keys
-   */
-  enclave: KeyInfo[];
+  keys: KeyInfo[];
 }
 
 /**

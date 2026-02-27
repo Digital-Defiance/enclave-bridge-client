@@ -15,6 +15,8 @@ TypeScript client for **Enclave Bridge** - a macOS app that bridges Node.js to A
 - 🌊 **Streaming Support** - Process large files with chunked encryption/decryption
 - 🏊 **Connection Pooling** - Manage multiple connections for high-throughput scenarios
 
+- 🔑 **Optional TOTP 2FA** - Per-key two-factor authentication (RFC 6238, compatible with Google Authenticator, Authy, etc.)
+
 ## Prerequisites
 
 - macOS with Apple Silicon (M1/M2/M3/M4) chip
@@ -71,6 +73,23 @@ main().catch(console.error);
 ```
 
 ## API Reference
+### TOTP 2FA Methods
+
+#### `enableTOTP(keyId: string, account: string, issuer: string): Promise<string>`
+Enable TOTP for a key and receive provisioning URI for authenticator apps.
+
+```typescript
+const provisioningURI = await client.enableTOTP('ecies-secp256k1', 'user@example.com', 'MyApp');
+console.log('Scan this URI in your authenticator app:', provisioningURI);
+```
+
+#### `exportKey(keyId: string, totpCode?: string): Promise<PublicKeyInfo>`
+Export key material (public key) with optional TOTP code. If TOTP is enabled for the key, a valid code is required.
+
+```typescript
+const key = await client.exportKey('ecies-secp256k1', '123456'); // TOTP code from app
+console.log('Exported key:', key.base64);
+```
 
 ### Constructor
 
@@ -472,6 +491,18 @@ The client uses the `@digitaldefiance/node-ecies-lib` ECIES format:
 | Ciphertext | Variable | Encrypted data |
 
 ## Protocol
+### TOTP 2FA API
+
+| Command         | Payload                                 | Description                                 |
+|-----------------|-----------------------------------------|---------------------------------------------|
+| `ENABLE_TOTP`   | `{ keyId, account, issuer }`            | Enable TOTP for a key, returns provisioning URI |
+| `EXPORT_KEY`    | `{ keyId, totpCode? }`                  | Export key, requires TOTP if enabled        |
+## End-to-End Testing
+
+E2E tests for TOTP 2FA and all bridge features are included:
+
+- Run: `npx tsx tests/e2e/enclave-bridge.e2e.ts` from the enclave-bridge-client directory
+- Tests cover TOTP enable, provisioning URI, key export with valid/invalid TOTP, and error handling
 
 Communication uses a JSON-based protocol over Unix domain socket:
 

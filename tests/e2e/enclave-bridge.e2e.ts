@@ -13,6 +13,9 @@
  *   npm run test:e2e
  */
 
+import speakeasy from 'speakeasy';
+
+
 import {
   EnclaveBridgeClient,
   parseECIES,
@@ -172,7 +175,63 @@ async function main() {
 
     await runTest('Should list available keys', async () => {
       const keys = await client!.listKeys();
-      console.log(`    ECIES keys: ${keys.ecies.length}, Enclave keys: ${keys.enclave.length}`);
+      console.log(`    Keys: ${keys.keys.length}`);
+      for (const key of keys.keys) {
+        console.log(`      - ${key.id} (TOTP: ${key.totpEnabled ? 'enabled' : 'disabled'})`);
+      }
+    });
+
+    // TOTP E2E Tests
+    console.log('\nTOTP 2FA Tests:');
+    let totpKeyId: string | undefined;
+    let provisioningURI: string | undefined;
+    await runTest('Should enable TOTP for ECIES key', async () => {
+      const keys = await client!.listKeys();
+      const eciesKey = keys.keys.find((k) => k.type === 'secp256k1');
+      if (!eciesKey) throw new Error('No ECIES key found');
+      totpKeyId = eciesKey.id;
+      provisioningURI = await client!.enableTOTP(totpKeyId, 'testuser@example.com', 'EnclaveBridgeE2E');
+      if (!provisioningURI.startsWith('otpauth://totp/')) {
+        throw new Error('Provisioning URI format invalid');
+      }
+      console.log(`    Provisioning URI: ${provisioningURI}`);
+    });
+
+    let validTOTP: string | undefined;
+    await runTest('Should fail to export key with missing TOTP', async () => {
+      try {
+        await client!.exportKey(totpKeyId!);
+        throw new Error('Export succeeded without TOTP');
+      } catch (err) {
+        if (!/TOTP code required|invalid/i.test(String(err))) throw err;
+      }
+    });
+
+    await runTest('Should fail to export key with invalid TOTP', async () => {
+      try {
+        await client!.exportKey(totpKeyId!, '000000');
+        throw new Error('Export succeeded with invalid TOTP');
+      } catch (err) {
+        if (!/TOTP code required|invalid/i.test(String(err))) throw err;
+      }
+    });
+
+    // Extract secret from provisioning URI for test TOTP code generation
+    await runTest('Should export key with valid TOTP', async () => {
+      const secretMatch = provisioningURI!.match(/secret=([A-Z2-7]+)/);
+      if (!secretMatch) throw new Error('No secret in provisioning URI');
+      const secret = secretMatch[1];
+      // Generate valid TOTP code using speakeasy
+      validTOTP = speakeasy.totp({
+        secret,
+        encoding: 'base32',
+        algorithm: 'sha1',
+        digits: 6,
+        step: 30
+      });
+      const key = await client!.exportKey(totpKeyId!, validTOTP);
+      if (!key.base64) throw new Error('No publicKey returned');
+      console.log(`    Exported key with valid TOTP: ${key.base64.slice(0, 20)}...`);
     });
 
     // Test: Signing
@@ -201,11 +260,16 @@ async function main() {
     let eciesLib: typeof import('@digitaldefiance/node-ecies-lib') | null = null;
     try {
       eciesLib = await import('@digitaldefiance/node-ecies-lib');
-    } catch {
+      if (!eciesLib || typeof eciesLib !== 'object') {
+        console.error('ECIES import returned:', eciesLib);
+        console.log('  ⚠ Skipping ECIES tests - @digitaldefiance/node-ecies-lib not installed or import failed');
+      }
+    } catch (err) {
+      console.error('ECIES import error:', err);
       console.log('  ⚠ Skipping ECIES tests - @digitaldefiance/node-ecies-lib not installed');
     }
 
-    if (eciesLib && bridgePublicKey) {
+    if (eciesLib && typeof eciesLib.ECIESService === 'function' && bridgePublicKey) {
       await runTest('Should decrypt ECIES-encrypted message', async () => {
         const ecies = new eciesLib!.ECIESService();
         const testMessage = Buffer.from('Hello from E2E test!');

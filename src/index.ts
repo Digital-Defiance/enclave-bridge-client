@@ -113,6 +113,51 @@ export const DEFAULT_MAX_CONCURRENT_REQUESTS = 10;
  * ```
  */
 export class EnclaveBridgeClient extends EventEmitter {
+      /**
+       * Export key material (public key) with optional TOTP code
+       * @param keyId - Key identifier
+       * @param totpCode - Optional TOTP code (if required)
+       * @returns Promise resolving to public key info
+       */
+      async exportKey(keyId: string, totpCode?: string): Promise<PublicKeyInfo> {
+        const payload: Record<string, string> = { keyId };
+        if (totpCode) payload.totpCode = totpCode;
+        const response = await this.sendCommand('EXPORT_KEY', payload);
+        const parsed = this.parseResponse(response);
+        if (!parsed.success || !parsed.json) {
+          throw new ProtocolError(`Failed to export key: ${parsed.error}`);
+        }
+        const base64Key = parsed.json.publicKey as string;
+        if (!base64Key) {
+          throw new ProtocolError('Response missing publicKey field');
+        }
+        const buffer = Buffer.from(base64Key, 'base64');
+        return {
+          base64: base64Key,
+          buffer,
+          hex: buffer.toString('hex'),
+          compressed: buffer.length === 33,
+        };
+      }
+    /**
+     * Enable TOTP for a key
+     * @param keyId - Key identifier
+     * @param account - Account name (e.g., user email)
+     * @param issuer - Issuer name (e.g., app name)
+     * @returns Promise resolving to provisioning URI
+     */
+    async enableTOTP(keyId: string, account: string, issuer: string): Promise<string> {
+      const response = await this.sendCommand('ENABLE_TOTP', { keyId, account, issuer });
+      const parsed = this.parseResponse(response);
+      if (!parsed.success || !parsed.json) {
+        throw new ProtocolError(`Failed to enable TOTP: ${parsed.error}`);
+      }
+      const uri = parsed.json.provisioningURI as string;
+      if (!uri) {
+        throw new ProtocolError('Response missing provisioningURI field');
+      }
+      return uri;
+    }
   private socket: Socket | null = null;
   private socketPath: string;
   private timeout: number;
@@ -1033,8 +1078,7 @@ export class EnclaveBridgeClient extends EventEmitter {
 
     const keyList = parsed.json;
     return {
-      ecies: (keyList.ecies as Array<{ id: string; publicKey: string }>) ?? [],
-      enclave: (keyList.enclave as Array<{ id: string; publicKey: string }>) ?? [],
+      keys: (keyList.keys as KeyInfo[]) ?? [],
     };
   }
 
