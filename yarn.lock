@@ -2,7 +2,7 @@
 # Manual changes might be lost - proceed with caution!
 
 __metadata:
-  version: 8
+  version: 9
   cacheKey: 10c0
 
 "@digitaldefiance/branded-enum@npm:0.0.7":
@@ -46,6 +46,8 @@ __metadata:
     "@digitaldefiance/branded-interface": "npm:^0.0.5"
     "@digitaldefiance/mongoose-types": "npm:^8.20.9"
     "@digitaldefiance/node-ecies-lib": "npm:^4.19.13"
+    "@noble/curves": "npm:^1.4.0"
+    "@noble/hashes": "npm:^1.4.0"
     "@types/node": "npm:^20.10.0"
     "@types/speakeasy": "npm:^2"
     "@types/validator": "npm:^13"
@@ -629,7 +631,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@noble/curves@npm:^1.4.2, @noble/curves@npm:~1.9.0":
+"@noble/curves@npm:^1.4.0, @noble/curves@npm:^1.4.2, @noble/curves@npm:~1.9.0":
   version: 1.9.7
   resolution: "@noble/curves@npm:1.9.7"
   dependencies:

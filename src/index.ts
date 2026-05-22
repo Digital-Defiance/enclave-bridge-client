@@ -25,6 +25,7 @@ export * from './crypto.js';
 export { ConnectionPool } from './pool.js';
 export type { ConnectionPoolOptions } from './pool.js';
 export * from './streaming.js';
+export * from './brightlink.js';
 
 import type {
   EnclaveBridgeClientOptions,
@@ -41,7 +42,20 @@ import type {
   ServerStatus,
   ServerMetrics,
   KeyList,
+  KeyInfo,
   HeartbeatResponse,
+  LinkSession,
+  LinkRegisterOptions,
+  LinkCoordinateFormat,
+  LinkGeoStatusResponse,
+  LinkGeoProximityResponse,
+  LinkGeoZoneResponse,
+  LinkGeoGetResponse,
+  LinkGeoRefreshResponse,
+  LinkGeoRefreshOptions,
+  LinkPushEvent,
+  LinkPushEventName,
+  LinkPushSubscription,
 } from './types.js';
 
 import {
@@ -52,10 +66,34 @@ import {
   PlatformError,
 } from './errors.js';
 
+import {
+  buildLinkRegisterEnvelope,
+  decryptLinkResponseEnvelope,
+  deriveSessionKey,
+  buildTranscript,
+  verifyTranscriptSignature,
+  buildPushAad,
+  LINK_SESSION_ID_LENGTH,
+  LINK_SHARE_LENGTH,
+} from './brightlink.js';
+import { createDecipheriv } from 'node:crypto';
+
 /**
- * Default socket path for Enclave Bridges
+ * Default socket path for BrightNexus (canonical BrightLink path).
+ *
+ * RFC §15 (Compatibility posture): this is the only path. Legacy
+ * `~/.enclave/enclave-bridge.sock` and `/tmp/enclave-bridge.sock` are
+ * NOT honored.
  */
-export const DEFAULT_SOCKET_PATH = '/tmp/enclave-bridge.sock';
+export const DEFAULT_SOCKET_PATH =
+  `${process.env.HOME ?? ''}/.brightchain/brightnexus/brightnexus.sock`;
+
+/**
+ * Environment variable that overrides the default socket path. Reserved
+ * name; v3-aware deployments set this to point at a non-default bridge
+ * (e.g. a test instance).
+ */
+export const BRIGHTNEXUS_SOCKET_ENV_VAR = 'BRIGHTNEXUS_SOCKET';
 
 /**
  * Default connection timeout in milliseconds
@@ -196,6 +234,35 @@ export class EnclaveBridgeClient extends EventEmitter {
   private connectedAt: number | null = null;
   private isManualDisconnect = false;
 
+  // BrightLink v1 (RFC §4.5)
+  /**
+   * Currently registered BrightLink session, or null if not registered. Set by
+   * `linkRegister()`, cleared by `disconnect()` or by re-registration.
+   */
+  linkSession: LinkSession | null = null;
+
+  /**
+   * Active LINK_PUSH subscribers on this client. The data handler dispatches
+   * incoming push frames to each subscriber whose `events` set includes the
+   * frame's event name. Per RFC §10.4 there is no `unsubscribe` verb —
+   * disconnecting the socket is the only way to fully tear down a
+   * subscription. Subscriber `close()` simply detaches the local handler;
+   * the bridge will keep emitting frames for the lifetime of the connection.
+   */
+  private linkPushSubscribers: Array<{
+    events: Set<string>;
+    onPayload: (event: LinkPushEvent) => void;
+    onError?: (err: Error, raw: Record<string, unknown>) => void;
+  }> = [];
+  /**
+   * TOFU-pinned SEP public key (RFC §4.5.5). On first successful
+   * `linkRegister()`, the bridge's SEP public key is captured here. On
+   * subsequent registrations, the SEP key MUST byte-match this pin or
+   * the registration is rejected. Callers MAY explicitly set this from
+   * persisted storage to enforce a pin across process lifetimes.
+   */
+  pinnedSepPublicKey: Buffer | null = null;
+
   /**
    * Creates a new Enclave Bridge client
    *
@@ -203,7 +270,15 @@ export class EnclaveBridgeClient extends EventEmitter {
    */
   constructor(options: EnclaveBridgeClientOptions = {}) {
     super();
-    this.socketPath = options.socketPath ?? DEFAULT_SOCKET_PATH;
+    // Socket path resolution order:
+    //   1. Explicit options.socketPath
+    //   2. $BRIGHTNEXUS_SOCKET environment variable
+    //   3. ~/.brightchain/brightnexus/brightnexus.sock (canonical default)
+    // RFC §15: there are no legacy fallbacks.
+    this.socketPath =
+      options.socketPath ??
+      process.env[BRIGHTNEXUS_SOCKET_ENV_VAR] ??
+      DEFAULT_SOCKET_PATH;
     this.timeout = options.timeout ?? DEFAULT_TIMEOUT;
     this.autoReconnect = options.autoReconnect ?? true;
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
@@ -549,6 +624,30 @@ export class EnclaveBridgeClient extends EventEmitter {
       this.log('debug', 'Parsed response', { response: jsonStr });
       this.emit('responseReceived', jsonStr);
 
+      // BrightLink v1.1 §10 push frame? These arrive asynchronously over
+      // the same socket as request responses but are NOT replies to any
+      // pending request. We detect them by the presence of the AAD-shaped
+      // (event, iv, ciphertext, authTag) tuple — the subscribe-ack frame
+      // (`{ok:true, subscribed:[...]}`) does not carry those fields and
+      // is handled as a normal response below.
+      let parsedJson: Record<string, unknown> | null = null;
+      try {
+        parsedJson = JSON.parse(jsonStr) as Record<string, unknown>;
+      } catch {
+        // Malformed JSON — fall through and let the resolver path
+        // (or the next-data accumulation) handle it.
+      }
+      if (
+        parsedJson !== null &&
+        typeof parsedJson['event'] === 'string' &&
+        typeof parsedJson['iv'] === 'string' &&
+        typeof parsedJson['ciphertext'] === 'string' &&
+        typeof parsedJson['authTag'] === 'string'
+      ) {
+        this.dispatchPushFrame(parsedJson);
+        continue;
+      }
+
       // Find the first request that was actually sent (not just queued)
       const sentRequestIndex = this.requestQueue.findIndex((r) => r.sent);
       if (sentRequestIndex !== -1) {
@@ -586,15 +685,25 @@ export class EnclaveBridgeClient extends EventEmitter {
   }
 
   /**
-   * Send request directly to socket
+   * Send request directly to socket.
+   *
+   * Payload values may be strings, numbers, booleans, or — to support the
+   * BrightLink v1.1 surface — arrays of those primitives (e.g. the
+   * `subscribe: ["zone-transition"]` array on `LINK_PUSH`).
    */
-  private sendRequestToSocket(command: string, payload?: Record<string, string>): void {
-    const request: Record<string, string> = { cmd: command, ...payload };
+  private sendRequestToSocket(
+    command: string,
+    payload?: Record<string, unknown>,
+  ): void {
+    const request: Record<string, unknown> = {
+      cmd: command,
+      ...payload,
+    };
     const message = JSON.stringify(request);
-    
+
     this.log('debug', 'Sending request', { command, payload });
     this.emit('requestSent', command, payload);
-    
+
     this.socket!.write(message);
   }
 
@@ -609,7 +718,10 @@ export class EnclaveBridgeClient extends EventEmitter {
    * @param payload - Optional payload object to include in the request
    * @returns Promise resolving to the response string (JSON)
    */
-  private async sendCommand(command: string, payload?: Record<string, string>): Promise<string> {
+  private async sendCommand(
+    command: string,
+    payload?: Record<string, unknown>,
+  ): Promise<string> {
     if (!this.socket || !this.isConnected) {
       throw new InvalidOperationError('Not connected to EnclaveBridge');
     }
@@ -1081,6 +1193,515 @@ export class EnclaveBridgeClient extends EventEmitter {
       keys: (keyList.keys as KeyInfo[]) ?? [],
     };
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // BrightLink v1 — see docs/rfc-brightlink.md
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Establish a BrightLink session against the connected bridge.
+   *
+   * The handshake flow (RFC §4.5):
+   *
+   *   1. Fetch the bridge's persistent secp256k1 ECIES public key
+   *      (`GET_PUBLIC_KEY`) and SEP P-256 public key
+   *      (`GET_ENCLAVE_PUBLIC_KEY`).
+   *   2. If `pinnedSepPublicKey` is set, verify the bridge's SEP key
+   *      byte-matches the pin (TOFU per §4.5.5). On mismatch, throw.
+   *   3. Build the §4.5.1 plaintext envelope (clientPub, clientShare,
+   *      issuedAtBd, ttlSeconds, agent), ECIES-encrypt it to the bridge.
+   *   4. Send `LINK_REGISTER` with the envelope + a fresh clientNonce.
+   *   5. Decrypt the bridge's `responseEnvelope` to recover bridgeShare.
+   *   6. Derive K_session via the §4.5.2 bilateral HKDF.
+   *   7. Reconstruct the §4.5.3 canonical 234-byte transcript and verify
+   *      the bridge's `transcriptSig` against the SEP public key.
+   *   8. On success, populate `this.linkSession` and pin the SEP key on
+   *      first registration.
+   *
+   * Throws `InvalidOperationError` if already registered on this client.
+   * Throws `ProtocolError` on bridge errors or signature verification failure.
+   *
+   * @example
+   *   const session = await client.linkRegister({ ttlSeconds: 600 });
+   *   // session.sessionId, session.kSession, etc. are now available.
+   *
+   * @returns The newly established session (also stored on `this.linkSession`).
+   */
+  async linkRegister(options: LinkRegisterOptions = {}): Promise<LinkSession> {
+    if (this.linkSession !== null) {
+      throw new InvalidOperationError(
+        'Already registered on this connection — call disconnect()/reconnect or null linkSession to re-register',
+      );
+    }
+    if (!this.isConnected) {
+      throw new InvalidOperationError(
+        'Cannot register: client is not connected. Call connect() first.',
+      );
+    }
+
+    // Fetch keys.
+    const bridgePubInfo = await this.getPublicKey();
+    if (bridgePubInfo.buffer.length !== 65 || bridgePubInfo.buffer[0] !== 0x04) {
+      throw new ProtocolError(
+        `Bridge GET_PUBLIC_KEY returned non-uncompressed key (${bridgePubInfo.buffer.length} bytes, prefix 0x${bridgePubInfo.buffer[0].toString(16)}); RFC §4.5 requires 65-byte uncompressed`,
+      );
+    }
+    const sepPubInfo = await this.getEnclavePublicKey();
+    if (sepPubInfo.buffer.length !== 65 || sepPubInfo.buffer[0] !== 0x04) {
+      throw new ProtocolError(
+        `Bridge GET_ENCLAVE_PUBLIC_KEY returned non-uncompressed key (${sepPubInfo.buffer.length} bytes); RFC §4.6 requires 65-byte uncompressed X9.63`,
+      );
+    }
+
+    // TOFU pinning per §4.5.5.
+    if (this.pinnedSepPublicKey && !this.pinnedSepPublicKey.equals(sepPubInfo.buffer)) {
+      throw new ProtocolError(
+        'SEP public key changed since pinned — refusing registration (TOFU mismatch)',
+      );
+    }
+
+    // Build the §4.5.1 envelope.
+    const built = buildLinkRegisterEnvelope(bridgePubInfo.buffer, {
+      ttlSeconds: options.ttlSeconds,
+      issuedAtBd: options.issuedAtBd,
+      agent: options.agentInfo,
+    });
+
+    // Send LINK_REGISTER. The existing `sendCommand` helper takes a flat
+    // record of strings; we pass the entire request payload that way.
+    // (`cmd` is set inline by `sendRequestToSocket`; we strip it from
+    // the flat payload before passing it on.)
+    const { cmd: _ignored, ...payload } = built.request;
+    void _ignored;
+    const response = await this.sendCommand('LINK_REGISTER', {
+      protocolVersion: payload.protocolVersion,
+      clientNonce: payload.clientNonce,
+      envelope: payload.envelope,
+    });
+    const parsed = this.parseResponse(response);
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`LINK_REGISTER failed: ${parsed.error}`);
+    }
+
+    // Validate response shape.
+    const respObj = parsed.json as Record<string, unknown>;
+    const sessionIdStr = respObj['sessionId'];
+    const respEnvelopeStr = respObj['responseEnvelope'];
+    const transcriptSigStr = respObj['transcriptSig'];
+    const bridgeIssuedAtUnixRaw = respObj['bridgeIssuedAtUnix'];
+    const grantedTtlSecondsRaw = respObj['ttlSeconds'];
+
+    if (
+      typeof sessionIdStr !== 'string' ||
+      typeof respEnvelopeStr !== 'string' ||
+      typeof transcriptSigStr !== 'string' ||
+      typeof bridgeIssuedAtUnixRaw !== 'number' ||
+      typeof grantedTtlSecondsRaw !== 'number'
+    ) {
+      throw new ProtocolError('LINK_REGISTER response is missing required fields');
+    }
+
+    const sessionId = Buffer.from(sessionIdStr, 'base64');
+    if (sessionId.length !== LINK_SESSION_ID_LENGTH) {
+      throw new ProtocolError(
+        `sessionId is not ${LINK_SESSION_ID_LENGTH} bytes (got ${sessionId.length})`,
+      );
+    }
+    const transcriptSig = Buffer.from(transcriptSigStr, 'base64');
+    const responseEnvelope = Buffer.from(respEnvelopeStr, 'base64');
+    const bridgeIssuedAtUnix = bridgeIssuedAtUnixRaw;
+    const grantedTtlSeconds = grantedTtlSecondsRaw;
+
+    // Decrypt responseEnvelope to recover bridgeShare.
+    let bridgeShare: Buffer;
+    try {
+      bridgeShare = decryptLinkResponseEnvelope(responseEnvelope, built.ephemeralPriv);
+    } catch (err) {
+      throw new ProtocolError(
+        `Failed to decrypt bridge responseEnvelope: ${(err as Error).message}`,
+      );
+    }
+    if (bridgeShare.length !== LINK_SHARE_LENGTH) {
+      throw new ProtocolError(
+        `bridgeShare is not ${LINK_SHARE_LENGTH} bytes (got ${bridgeShare.length})`,
+      );
+    }
+
+    // Derive K_session.
+    const kSession = deriveSessionKey({
+      clientNonce: built.clientNonce,
+      sessionId,
+      clientShare: built.clientShare,
+      bridgeShare,
+    });
+
+    // Reconstruct transcript and verify SEP signature.
+    const transcript = buildTranscript({
+      clientNonce: built.clientNonce,
+      clientPub: built.ephemeralPub,
+      clientShare: built.clientShare,
+      sessionId,
+      bridgeShare,
+      issuedAtBd: built.issuedAtBd,
+      bridgeIssuedAtUnix,
+      ttlSeconds: grantedTtlSeconds,
+    });
+    if (!verifyTranscriptSignature(sepPubInfo.buffer, transcript, transcriptSig)) {
+      throw new ProtocolError(
+        'Transcript signature verification failed — bridge identity not authenticated',
+      );
+    }
+
+    // Pin the SEP public key on first successful registration (TOFU).
+    if (!this.pinnedSepPublicKey) {
+      this.pinnedSepPublicKey = Buffer.from(sepPubInfo.buffer);
+    }
+
+    // Build the public session record.
+    const session: LinkSession = {
+      sessionId,
+      kSession,
+      bridgeIssuedAtUnix,
+      ttlSeconds: grantedTtlSeconds,
+      expiresAtUnix: bridgeIssuedAtUnix + grantedTtlSeconds,
+      sepPublicKey: Buffer.from(sepPubInfo.buffer),
+      outboundCounter: 0n,
+      lastInboundCounter: 0n,
+    };
+    this.linkSession = session;
+
+    // Wipe sensitive intermediates.
+    bridgeShare.fill(0);
+    built.ephemeralPriv.fill(0);
+
+    this.log('info', `[brightlink] Registered session ${sessionId.toString('hex')} (ttl=${grantedTtlSeconds}s)`);
+    return session;
+  }
+
+  /**
+   * Clear the current BrightLink session, zeroizing K_session. Safe to call
+   * even if no session is active. Intended for callers that want to
+   * tear down a session without disconnecting the EBP/1 transport.
+   */
+  linkUnregister(): void {
+    if (this.linkSession) {
+      this.linkSession.kSession.fill(0);
+      this.log('info', `[brightlink] Cleared session ${this.linkSession.sessionId.toString('hex')}`);
+      this.linkSession = null;
+    }
+    // Drop any push subscriptions — they're tied to the session.
+    this.linkPushSubscribers = [];
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // BrightLink v1.1 — geo command surface (RFC §9)
+  //
+  // Each method requires a registered `LINK_REGISTER` session on this
+  // connection (call `linkRegister()` first). Response shapes match
+  // RFC §9.{1..5} with snake_case keys converted to camelCase for the
+  // TypeScript surface.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * §9.1 LINK_GEO_STATUS — alive + fix age, no scope gate.
+   *
+   * The only geo command that bypasses the ACL. Carries no location data,
+   * just liveness and accuracy. Use this to gate "is geo even available?"
+   * before asking for higher-friction scopes.
+   */
+  async linkGeoStatus(): Promise<LinkGeoStatusResponse> {
+    const response = await this.sendCommand('LINK_GEO_STATUS');
+    const parsed = this.parseResponse(response);
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`LINK_GEO_STATUS failed: ${parsed.error}`);
+    }
+    const r = parsed.json;
+    return {
+      alive: Boolean(r['alive']),
+      engineKind: String(r['engine_kind'] ?? ''),
+      fixAgeSeconds:
+        typeof r['fix_age_seconds'] === 'number' ? r['fix_age_seconds'] : null,
+      accuracyM:
+        typeof r['accuracy_m'] === 'number' ? r['accuracy_m'] : null,
+    };
+  }
+
+  /**
+   * §9.2 LINK_GEO_PROXIMITY — yes/no for a named zone.
+   *
+   * The lowest-friction zone query: the caller MUST name the zone they
+   * want to know about, and the bridge does not enumerate zones in the
+   * response. A caller cannot use this to discover what zones exist —
+   * they can only confirm or deny membership in a zone they already know
+   * by name. Gated by the `geo:proximity` scope.
+   *
+   * @param zoneId The id of the zone to test against (e.g. `"zone-prod-office"`).
+   */
+  async linkGeoProximity(zoneId: string): Promise<LinkGeoProximityResponse> {
+    if (!zoneId) {
+      throw new InvalidOperationError('linkGeoProximity requires a non-empty zone id');
+    }
+    const response = await this.sendCommand('LINK_GEO_PROXIMITY', { zone: zoneId });
+    const parsed = this.parseResponse(response);
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`LINK_GEO_PROXIMITY failed: ${parsed.error}`);
+    }
+    const r = parsed.json;
+    return {
+      inZone: Boolean(r['in_zone']),
+      brightdate:
+        typeof r['brightdate'] === 'number' ? r['brightdate'] : 0,
+    };
+  }
+
+  /**
+   * §9.3 LINK_GEO_ZONE — current zone identifier and dwell duration.
+   *
+   * Returns the highest-priority current zone (RFC §8) and the duration
+   * since the last zone change. Returns `zone: null` when no zone matches.
+   * Gated by the `geo:zone` scope.
+   */
+  async linkGeoZone(): Promise<LinkGeoZoneResponse> {
+    const response = await this.sendCommand('LINK_GEO_ZONE');
+    const parsed = this.parseResponse(response);
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`LINK_GEO_ZONE failed: ${parsed.error}`);
+    }
+    const r = parsed.json;
+    return {
+      zone: typeof r['zone'] === 'string' ? r['zone'] : null,
+      dwellSeconds:
+        typeof r['dwell_seconds'] === 'number' ? r['dwell_seconds'] : 0,
+      brightdate:
+        typeof r['brightdate'] === 'number' ? r['brightdate'] : 0,
+    };
+  }
+
+  /**
+   * §9.4 LINK_GEO_GET — full position.
+   *
+   * Returns `{position: {wgs84?, brightspace?}, accuracyM, brightdate}`,
+   * with the sub-objects populated according to the requested format.
+   * Gated by the `geo:precise` scope.
+   *
+   * @param format `"wgs84"` | `"brightspace"` | `"both"` (default `"both"`).
+   */
+  async linkGeoGet(
+    format: LinkCoordinateFormat = 'both',
+  ): Promise<LinkGeoGetResponse> {
+    if (format !== 'wgs84' && format !== 'brightspace' && format !== 'both') {
+      throw new InvalidOperationError(`Invalid format: ${format}`);
+    }
+    const response = await this.sendCommand('LINK_GEO_GET', { format });
+    const parsed = this.parseResponse(response);
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`LINK_GEO_GET failed: ${parsed.error}`);
+    }
+    const r = parsed.json;
+    const pos = (r['position'] as Record<string, unknown> | undefined) ?? {};
+    return {
+      position: pos as LinkGeoGetResponse['position'],
+      accuracyM:
+        typeof r['accuracy_m'] === 'number' ? r['accuracy_m'] : 0,
+      brightdate:
+        typeof r['brightdate'] === 'number' ? r['brightdate'] : 0,
+    };
+  }
+
+  /**
+   * §9.5 LINK_GEO_REFRESH — trigger a fresh fix.
+   *
+   * Returns when the fresh fix lands (or the timeout elapses). Does NOT
+   * return location data — the caller still has to issue a `linkGeoGet()`
+   * (or `linkGeoZone()`/`linkGeoProximity()`) to read the new position.
+   * Gated by the `geo:status` scope.
+   *
+   * @param options.timeoutSeconds Hold-open timeout in seconds. Default 10.
+   */
+  async linkGeoRefresh(
+    options: LinkGeoRefreshOptions = {},
+  ): Promise<LinkGeoRefreshResponse> {
+    const timeoutSeconds = options.timeoutSeconds ?? 10;
+    const response = await this.sendCommand('LINK_GEO_REFRESH', {
+      timeout_seconds: timeoutSeconds,
+    });
+    const parsed = this.parseResponse(response);
+    if (!parsed.success || !parsed.json) {
+      throw new ProtocolError(`LINK_GEO_REFRESH failed: ${parsed.error}`);
+    }
+    const r = parsed.json;
+    return {
+      fixAgeSeconds:
+        typeof r['fix_age_seconds'] === 'number' ? r['fix_age_seconds'] : 0,
+      accuracyM:
+        typeof r['accuracy_m'] === 'number' ? r['accuracy_m'] : 0,
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // BrightLink v1.1 — agent-to-shell push (RFC §10)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * §10 LINK_PUSH — subscribe to agent-initiated push events.
+   *
+   * The bridge holds the connection open and emits AAD-sealed event
+   * frames whenever the underlying engine reports an event of one of the
+   * subscribed kinds. The client decrypts each frame under `K_session`
+   * (which must be established via `linkRegister()` first) and invokes
+   * `onPayload` with the decrypted body.
+   *
+   * Per RFC §10.4, there is no explicit unsubscribe verb — disconnecting
+   * the socket is the only way to fully tear down a subscription on the
+   * bridge side. The returned handle's `close()` method detaches the
+   * local handler so `onPayload` stops firing, but the bridge will keep
+   * sending frames for the lifetime of the connection.
+   *
+   * @param events Event names to subscribe to (e.g. `["zone-transition"]`).
+   * @param handlers `onPayload` is called with each decrypted event;
+   *                 `onError` (optional) is called when a frame fails to
+   *                 decrypt or violates the replay window.
+   */
+  async linkPushSubscribe(
+    events: Array<LinkPushEventName | string>,
+    handlers: {
+      onPayload: (event: LinkPushEvent) => void;
+      onError?: (err: Error, raw: Record<string, unknown>) => void;
+    },
+  ): Promise<LinkPushSubscription> {
+    if (this.linkSession === null) {
+      throw new InvalidOperationError(
+        'linkPushSubscribe requires a registered session — call linkRegister() first',
+      );
+    }
+    if (events.length === 0) {
+      throw new InvalidOperationError(
+        'linkPushSubscribe requires at least one event name',
+      );
+    }
+
+    const subscriber = {
+      events: new Set<string>(events),
+      onPayload: handlers.onPayload,
+      onError: handlers.onError,
+    };
+    this.linkPushSubscribers.push(subscriber);
+
+    // Send the §10 subscribe request. The bridge's response is a single
+    // ack frame `{ok:true, subscribed:[...]}`; subsequent push frames
+    // arrive asynchronously and are dispatched via `dispatchPushFrame`.
+    const response = await this.sendCommand('LINK_PUSH', {
+      subscribe: events,
+    });
+    const parsed = this.parseResponse(response);
+    if (!parsed.success || !parsed.json) {
+      // Subscribe failed — back out the local handler.
+      this.linkPushSubscribers = this.linkPushSubscribers.filter(
+        (s) => s !== subscriber,
+      );
+      throw new ProtocolError(`LINK_PUSH failed: ${parsed.error}`);
+    }
+
+    return {
+      close: () => {
+        this.linkPushSubscribers = this.linkPushSubscribers.filter(
+          (s) => s !== subscriber,
+        );
+      },
+    };
+  }
+
+  /** Dispatch a push frame to every subscriber whose event-set includes
+   *  the frame's event name. Decrypt the frame body under `K_session`
+   *  using the §10.2 AAD construction and the session's
+   *  `lastInboundCounter` for replay defence. */
+  private dispatchPushFrame(frame: Record<string, unknown>): void {
+    if (this.linkPushSubscribers.length === 0) return;
+    const session = this.linkSession;
+    if (session === null) {
+      // Push frame arrived without an active session — should be impossible
+      // but the bridge could be misbehaving. Drop silently.
+      return;
+    }
+    const eventName = frame['event'];
+    const counterRaw = frame['counter'];
+    const ivStr = frame['iv'];
+    const ctStr = frame['ciphertext'];
+    const tagStr = frame['authTag'];
+    if (
+      typeof eventName !== 'string' ||
+      typeof ivStr !== 'string' ||
+      typeof ctStr !== 'string' ||
+      typeof tagStr !== 'string'
+    ) {
+      return;
+    }
+    let counter: bigint;
+    try {
+      counter = BigInt(
+        typeof counterRaw === 'bigint' ? counterRaw : (counterRaw as number | string),
+      );
+    } catch {
+      return;
+    }
+
+    // Find subscribers who care about this event name.
+    const targets = this.linkPushSubscribers.filter((s) => s.events.has(eventName));
+    if (targets.length === 0) return;
+
+    // Replay-window check (RFC §10.3).
+    if (counter <= session.lastInboundCounter) {
+      const err = new Error(
+        `push counter replayed (${counter} <= ${session.lastInboundCounter})`,
+      );
+      for (const t of targets) {
+        if (t.onError) t.onError(err, frame);
+      }
+      return;
+    }
+
+    let body: Buffer;
+    try {
+      const iv = Buffer.from(ivStr, 'base64');
+      const ct = Buffer.from(ctStr, 'base64');
+      const tag = Buffer.from(tagStr, 'base64');
+      const aad = buildPushAad({ counter, event: eventName });
+      const decipher = createDecipheriv('aes-256-gcm', session.kSession, iv, {
+        authTagLength: tag.length,
+      });
+      decipher.setAAD(aad);
+      decipher.setAuthTag(tag);
+      body = Buffer.concat([decipher.update(ct), decipher.final()]);
+    } catch (err) {
+      const wrapped = err instanceof Error ? err : new Error(String(err));
+      for (const t of targets) {
+        if (t.onError) t.onError(wrapped, frame);
+      }
+      return;
+    }
+
+    session.lastInboundCounter = counter;
+
+    let parsedBody: Record<string, unknown> = {};
+    try {
+      parsedBody = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+    } catch {
+      // The body wasn't JSON. Hand back an empty object — the event name
+      // alone may be enough for some handlers, and we don't want a
+      // misbehaving bridge to break the dispatch loop.
+    }
+
+    for (const t of targets) {
+      try {
+        t.onPayload({ event: eventName, counter, body: parsedBody });
+      } catch (err) {
+        if (t.onError) {
+          t.onError(err instanceof Error ? err : new Error(String(err)), frame);
+        }
+      }
+    }
+  }
+
 
   /**
    * Rotate Secure Enclave key (if supported)

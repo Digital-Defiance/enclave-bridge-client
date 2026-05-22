@@ -733,8 +733,10 @@ describe('Integration: Server Commands', () => {
       await startServer((socket, request) => {
         if (request.cmd === 'LIST_KEYS') {
           socket.write(JSON.stringify({
-            ecies: [{ id: 'ecies-default', publicKey: 'dGVzdEtleQ==' }],
-            enclave: [{ id: 'enclave-default', publicKey: 'ZW5jbGF2ZUtleQ==' }],
+            keys: [
+              { id: 'ecies-default', publicKey: 'dGVzdEtleQ==' },
+              { id: 'enclave-default', publicKey: 'ZW5jbGF2ZUtleQ==' },
+            ],
           }));
         }
       });
@@ -742,11 +744,10 @@ describe('Integration: Server Commands', () => {
       const client = new EnclaveBridgeClient({ socketPath });
       await client.connect();
 
-      const keys = await client.listKeys();
-      expect(keys.ecies).toHaveLength(1);
-      expect(keys.ecies[0].id).toBe('ecies-default');
-      expect(keys.enclave).toHaveLength(1);
-      expect(keys.enclave[0].id).toBe('enclave-default');
+      const result = await client.listKeys();
+      expect(result.keys).toHaveLength(2);
+      expect(result.keys[0].id).toBe('ecies-default');
+      expect(result.keys[1].id).toBe('enclave-default');
 
       await client.disconnect();
     });

@@ -295,7 +295,7 @@ export interface EnclaveBridgeClientEvents {
   /**
    * Emitted when a request is sent (debug only)
    */
-  requestSent: (command: string, payload?: Record<string, string>) => void;
+  requestSent: (command: string, payload?: Record<string, string | number | boolean>) => void;
 
   /**
    * Emitted when a response is received (debug only)
@@ -307,8 +307,12 @@ export interface EnclaveBridgeClientEvents {
  * Queued request information
  */
 export interface QueuedRequest {
+  /** Command name. */
   command: string;
-  payload?: Record<string, string>;
+  /** Payload values may be strings, numbers, booleans, or — to support the
+   *  BrightLink v1.1 surface — arrays of those primitives (e.g. the
+   *  `subscribe: ["zone-transition"]` array on `LINK_PUSH`). */
+  payload?: Record<string, unknown>;
   resolve: (value: string) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -514,4 +518,176 @@ export interface HeartbeatResponse {
    * Service name
    */
   service: string;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// BrightLink v1 — see docs/rfc-brightlink.md
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Information identifying the client to the bridge during LINK_REGISTER.
+ * Recorded in the bridge's audit log for diagnostic purposes per RFC §4.5.1.
+ *
+ * Each field is capped at 64 characters by the bridge; longer values are
+ * silently truncated, so prefer short values.
+ */
+export interface LinkAgentInfo {
+  /** Client identifier, e.g. "bsh", "my-cli". */
+  name: string;
+  /** Client version, e.g. "1.4.2". */
+  version: string;
+  /** Free-form platform tag, e.g. "darwin-arm64", "node-darwin-arm64". */
+  platform: string;
+}
+
+/**
+ * Options for `EnclaveBridgeClient.linkRegister(...)`.
+ */
+export interface LinkRegisterOptions {
+  /**
+   * Requested session lifetime in seconds. The bridge caps at 8h
+   * (`LINK_MAX_TTL_SECONDS = 28800`). Defaults to 1 hour if omitted.
+   */
+  ttlSeconds?: number;
+
+  /**
+   * Override the BrightDate scalar in the §4.5.1 envelope plaintext.
+   * Defaults to `Math.floor(Date.now() / 1000) / 86400` if omitted.
+   * Tests use this to reproduce known-answer vectors.
+   */
+  issuedAtBd?: number;
+
+  /**
+   * Identification advertised in the §4.5.1 envelope's `agent` field.
+   * Defaults to `{ name: "enclave-bridge-client", version: <pkg version>,
+   * platform: "node-<process.platform>-<process.arch>" }`.
+   */
+  agentInfo?: LinkAgentInfo;
+}
+
+/**
+ * The result of a successful LINK_REGISTER. The client holds this
+ * internally as `client.linkSession`; callers can read the public fields
+ * to drive their own session-aware logic.
+ *
+ * `kSession` is sensitive; do not log, do not persist. The client zeros
+ * this buffer on `disconnect()` and on re-registration.
+ */
+export interface LinkSession {
+  /** 16-byte session identifier the wire protocol uses. */
+  sessionId: Buffer;
+  /** 32-byte AES-256-GCM session key. */
+  kSession: Buffer;
+  /** Bridge's clock when the session was minted (Unix seconds). */
+  bridgeIssuedAtUnix: number;
+  /** Granted TTL after the bridge cap (≤ requested, ≤ 8h). */
+  ttlSeconds: number;
+  /** Effective expiry instant (Unix seconds). */
+  expiresAtUnix: number;
+  /** Bridge's SEP P-256 public key (65-byte uncompressed X9.63). */
+  sepPublicKey: Buffer;
+  /** Outbound (Shell → Agent) counter. Caller increments per emit. */
+  outboundCounter: bigint;
+  /** Highest accepted inbound (Agent → Shell) counter. Updated by the
+   *  receive path on successful packet verification. */
+  lastInboundCounter: bigint;
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────
+// BrightLink v1.1 — geo command surface (RFC §9) and push (RFC §10)
+// ──────────────────────────────────────────────────────────────────────────
+
+/** Coordinate format selector for `LINK_GEO_GET` (RFC §9.4). */
+export type LinkCoordinateFormat = 'wgs84' | 'brightspace' | 'both';
+
+/** WGS84 lat/lon/altitude (degrees / metres). */
+export interface LinkWgs84Position {
+  lat: number;
+  lon: number;
+  alt_m?: number;
+}
+
+/** BrightSpace ECEF position in BrightMeters (`x_bm = ecef_x_m / c`). */
+export interface LinkBrightSpacePosition {
+  x_bm: number;
+  y_bm: number;
+  z_bm: number;
+  /** BrightDate at which the fix was sampled (RFC §9.4 — long-lived
+   *  spatial claims SHOULD record this so consumers can re-project). */
+  epoch_bd: number;
+}
+
+/** Result of `LINK_GEO_STATUS` (RFC §9.1). */
+export interface LinkGeoStatusResponse {
+  alive: boolean;
+  engineKind: string;
+  fixAgeSeconds: number | null;
+  accuracyM: number | null;
+}
+
+/** Result of `LINK_GEO_PROXIMITY` (RFC §9.2). */
+export interface LinkGeoProximityResponse {
+  inZone: boolean;
+  brightdate: number;
+}
+
+/** Result of `LINK_GEO_ZONE` (RFC §9.3). */
+export interface LinkGeoZoneResponse {
+  /** Current zone id, or null if no zone matches. */
+  zone: string | null;
+  /** Seconds since the last zone transition. 0 on first observation. */
+  dwellSeconds: number;
+  brightdate: number;
+}
+
+/** Result of `LINK_GEO_GET` (RFC §9.4). At least one of `wgs84` or
+ *  `brightspace` is present, depending on the requested format. */
+export interface LinkGeoGetResponse {
+  position: {
+    wgs84?: LinkWgs84Position;
+    brightspace?: LinkBrightSpacePosition;
+  };
+  accuracyM: number;
+  brightdate: number;
+}
+
+/** Result of `LINK_GEO_REFRESH` (RFC §9.5). The data itself is NOT
+ *  returned — the caller still has to issue a `LINK_GEO_GET` afterwards
+ *  to read the fresh position. */
+export interface LinkGeoRefreshResponse {
+  fixAgeSeconds: number;
+  accuracyM: number;
+}
+
+/** Options for `LINK_GEO_REFRESH`. */
+export interface LinkGeoRefreshOptions {
+  /** Hold-open timeout in seconds. Default 10. */
+  timeoutSeconds?: number;
+}
+
+/** Event-name strings carried in `LINK_PUSH` frames (RFC §10.1).
+ *  Exposed as a string union so callers can pass literal strings. */
+export type LinkPushEventName = 'zone-transition' | 'geo-grant-changed';
+
+/** A decrypted push event delivered to a `linkPushSubscribe` handler.
+ *  The body is whatever the bridge sealed under K_session for this event
+ *  type — for `zone-transition` it's `{from, to, at_bd}`; for
+ *  `geo-grant-changed` it's `{scope, policy, by}`. */
+export interface LinkPushEvent {
+  /** The event name, e.g. `"zone-transition"`. */
+  event: LinkPushEventName | string;
+  /** Per-session monotonic counter (`c_agent_to_shell`). Strictly
+   *  increasing across the subscriber's lifetime. */
+  counter: bigint;
+  /** Decrypted plaintext body. JSON-decoded shape varies by event type. */
+  body: Record<string, unknown>;
+}
+
+/** Subscription handle returned by `linkPushSubscribe`. Calling `close()`
+ *  detaches the handler; the underlying socket subscription persists for
+ *  the life of the EBP/1 connection (per RFC §10.4 — disconnect is the
+ *  only way to fully unsubscribe). */
+export interface LinkPushSubscription {
+  close(): void;
 }

@@ -424,7 +424,9 @@ describe('EnclaveBridgeClient', () => {
 
   describe('exports', () => {
     it('should export DEFAULT_SOCKET_PATH', () => {
-      expect(DEFAULT_SOCKET_PATH).toBe('/tmp/enclave-bridge.sock');
+      expect(DEFAULT_SOCKET_PATH).toBe(
+        `${process.env.HOME ?? ''}/.brightchain/brightnexus/brightnexus.sock`,
+      );
     });
 
     it('should export DEFAULT_TIMEOUT', () => {

@@ -1,6 +1,6 @@
 # @digitaldefiance/enclave-bridge-client
 
-TypeScript client for **Enclave Bridge** - a macOS app that bridges Node.js to Apple's Secure Enclave via Unix domain socket.
+TypeScript client for **BrightNexus** (formerly Enclave Bridge) — a macOS app that bridges Node.js to Apple's Secure Enclave via Unix domain socket. Ships the EBP/1 surface and the BrightLink v1 `linkRegister()` flow.
 
 ## Features
 
@@ -14,13 +14,14 @@ TypeScript client for **Enclave Bridge** - a macOS app that bridges Node.js to A
 - 💾 **Key Caching** - Optional caching for frequently-used public keys
 - 🌊 **Streaming Support** - Process large files with chunked encryption/decryption
 - 🏊 **Connection Pooling** - Manage multiple connections for high-throughput scenarios
+- 🛰️ **BrightLink v1 client** - `linkRegister()` with bilateral HKDF, SEP-signed transcript verification, TOFU pinning. Implements [RFC §4.5](https://github.com/Digital-Defiance/bsh/blob/main/docs/rfc-brightlink.md). `linkDeliver()` for credential delivery is on the queue (the demo path runs through bsh; this method is for non-bsh integrations).
 
 - 🔑 **Optional TOTP 2FA** - Per-key two-factor authentication (RFC 6238, compatible with Google Authenticator, Authy, etc.)
 
 ## Prerequisites
 
 - macOS with Apple Silicon (M1/M2/M3/M4) chip
-- [Enclave Bridge](https://github.com/Digital-Defiance/enclave-bridge/releases) macOS app running. Also available directly from [Apple App Store](https://apps.apple.com/us/app/enclave-bridge/id6758280835?mt=12).
+- [BrightNexus](https://github.com/Digital-Defiance/BrightNexus) macOS app running (formerly published as Enclave Bridge). The package name `@digitaldefiance/enclave-bridge-client` is unchanged across the rename.
 - Node.js 18+
 
 ## Installation
@@ -101,7 +102,7 @@ new EnclaveBridgeClient(options?: EnclaveBridgeClientOptions)
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `socketPath` | `string` | `/tmp/enclave-bridge.sock` | Path to Unix socket |
+| `socketPath` | `string` | `${HOME}/.brightchain/brightnexus/brightnexus.sock` | Path to Unix socket. Falls back to `$BRIGHTNEXUS_SOCKET` env var if set. |
 | `timeout` | `number` | `30000` | Operation timeout in ms |
 | `autoReconnect` | `boolean` | `true` | Auto-reconnect on disconnect |
 | `maxReconnectAttempts` | `number` | `5` | Max reconnection attempts |
